@@ -3,6 +3,8 @@ services:
     build: .
     container_name: lu_schedule_bot
     restart: unless-stopped
+    env_file:
+      - .env
     ports:
       - "8085:8085"
     volumes:
@@ -12,10 +14,10 @@ services:
       - ./db.py:/app/db.py
       - ./templates:/app/templates
       - ./scraper.js:/app/scraper.js
+      - ./scraper_worker.py:/app/scraper_worker.py
       - ./teachers.py:/app/teachers.py
       - ./scraper_teacher.js:/app/scraper_teacher.js
       - ./locales.py:/app/locales.py
     environment:
-      - BOT_TOKEN=8875341555:AAEr-zWOLTdIAwGXp768yETETIpc4JgFYQA
-      - ADMIN_PORT=8085
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
+      ADMIN_PORT: ${ADMIN_PORT:-8085}
+      PUPPETEER_EXECUTABLE_PATH: ${PUPPETEER_EXECUTABLE_PATH:-/usr/bin/chromium}

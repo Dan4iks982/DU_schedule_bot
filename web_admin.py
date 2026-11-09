@@ -6,6 +6,7 @@ import asyncio
 import subprocess
 import logging
 import shutil
+import secrets
 from datetime import datetime, date, time, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -45,14 +46,14 @@ TEMPLATES_DIR = BASE_DIR / "templates"
 
 ADMIN_ACCOUNTS = {
     "danik_root": {
-        "password": "Dx9#mK7$vQ2",
+        "password": os.getenv("ADMIN_DANIK_ROOT_PASSWORD", ""),
         "name": "Даниил",
         "username": "Dan4iks982",
         "user_id": 879446270,
         "role": "Главный администратор"
     },
     "sinica_admin": {
-        "password": "Sn8@pL4!zR9",
+        "password": os.getenv("ADMIN_SINICA_PASSWORD", ""),
         "name": "Даник Синица",
         "username": "daniksinica",
         "user_id": 1441874567,
@@ -60,6 +61,7 @@ ADMIN_ACCOUNTS = {
     }
 }
 ACTIVE_SESSIONS = {}
+SESSION_TTL_SECONDS = int(os.getenv("ADMIN_SESSION_TTL_SECONDS", "28800"))
 
 DU_PROGRAMS_MAP = {
     "D01B9": "Информационные технологии (PBSP D01B9)",
@@ -95,13 +97,6 @@ WEEKDAY_RU = {
 }
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-if not BOT_TOKEN:
-    env_file = BASE_DIR / ".env"
-    if env_file.exists():
-        with open(env_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.startswith("BOT_TOKEN="):
-                    BOT_TOKEN = line.strip().split("=", 1)[1].strip('"\'')
 
 bot_process: Optional[subprocess.Popen] = None
 bot_started_at: Optional[datetime] = None
@@ -109,17 +104,37 @@ is_manually_stopped = False
 
 app = FastAPI(title="LU Schedule Bot Admin Pro")
 
+def _cors_origins() -> list[str]:
+    configured = os.getenv("ADMIN_CORS_ORIGINS", "http://localhost:8085")
+    return [origin.strip() for origin in configured.split(",") if origin.strip()]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins(),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+@app.middleware("http")
+async def require_admin_auth(request: Request, call_next):
+    if request.url.path.startswith("/api/") and request.url.path not in {
+        "/api/auth/login", "/api/auth/me"
+    }:
+        token = request.headers.get("X-Admin-Token", "")
+        session = ACTIVE_SESSIONS.get(token)
+        if not session or session.get("expires_at", 0) <= datetime.now(TIMEZONE).timestamp():
+            ACTIVE_SESSIONS.pop(token, None)
+            return JSONResponse(status_code=401, content={"detail": "Требуется авторизация администратора"})
+    return await call_next(request)
+
 def load_json(file_path: Path, default=None):
     if default is None:
         default = {}
+    if file_path.name in db.STATE_KEYS:
+        state = db.get_state(file_path.name)
+        if state is not None:
+            return state
     if file_path.exists():
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -130,6 +145,9 @@ def load_json(file_path: Path, default=None):
 
 def save_json(file_path: Path, data):
     file_path.parent.mkdir(parents=True, exist_ok=True)
+    if file_path.name in db.STATE_KEYS:
+        db.set_state(file_path.name, data)
+        return
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -384,6 +402,7 @@ async def watchdog_task():
 
 @app.on_event("startup")
 async def startup_event():
+    await asyncio.to_thread(db.migrate_state_files)
     start_bot_process()
     asyncio.create_task(watchdog_task())
 
@@ -433,6 +452,16 @@ def api_status():
         "commands": stats.get("commands", {}),
         "telemetry": get_system_telemetry(),
         "server_time": datetime.now(TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+@app.get("/health")
+def health():
+    """Cheap liveness/readiness probe that avoids loading dashboard state."""
+    bot_running = bool(bot_process and bot_process.poll() is None)
+    return {
+        "status": "ok" if bot_running else "degraded",
+        "bot_running": bot_running,
+        "timestamp": datetime.now(TIMEZONE).isoformat(),
     }
 
 @app.get("/api/radar")
@@ -1246,7 +1275,7 @@ def api_auth_login(req: LoginRequest):
     login_clean = req.login.strip().lower()
     for lk, acc in ADMIN_ACCOUNTS.items():
         if lk.lower() == login_clean and acc["password"] == req.password.strip():
-            token = f"adm_token_{uuid.uuid4().hex[:16]}"
+            token = secrets.token_urlsafe(32)
             session_info = {
                 "login": lk,
                 "name": acc["name"],
@@ -1256,6 +1285,7 @@ def api_auth_login(req: LoginRequest):
                 "vip_danik": acc.get("vip_danik", False),
                 "login_time": datetime.now(TIMEZONE).isoformat()
             }
+            session_info["expires_at"] = datetime.now(TIMEZONE).timestamp() + SESSION_TTL_SECONDS
             ACTIVE_SESSIONS[token] = session_info
             return {
                 "success": True,
@@ -1267,8 +1297,10 @@ def api_auth_login(req: LoginRequest):
 @app.get("/api/auth/me")
 def api_auth_me(request: Request):
     token = request.headers.get("X-Admin-Token")
-    if token and token in ACTIVE_SESSIONS:
-        return {"authenticated": True, "admin": ACTIVE_SESSIONS[token]}
+    session = ACTIVE_SESSIONS.get(token)
+    if session and session.get("expires_at", 0) > datetime.now(TIMEZONE).timestamp():
+        return {"authenticated": True, "admin": session}
+    ACTIVE_SESSIONS.pop(token, None)
     # Return unauthenticated if no valid token
     return {"authenticated": False}
 
@@ -1619,6 +1651,15 @@ def index():
 
 def main():
     port = int(os.getenv("ADMIN_PORT", 8085))
+    missing = [
+        name for name in (
+            "BOT_TOKEN",
+            "ADMIN_DANIK_ROOT_PASSWORD",
+            "ADMIN_SINICA_PASSWORD",
+        ) if not os.getenv(name)
+    ]
+    if missing:
+        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
     logger.info(f"Starting Web Admin Panel Pro on port {port}...")
     uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
 

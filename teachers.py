@@ -15,6 +15,8 @@ DATA_DIR = BASE_DIR / "data"
 TEACHERS_CATALOG_FILE = DATA_DIR / "du_teachers.json"
 TEACHERS_CACHE_DIR = DATA_DIR / "teachers"
 TEACHERS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TEACHER_SCRAPE_SEMAPHORE = asyncio.Semaphore(1)
+TEACHER_SCRAPE_LOCKS = {}
 
 MONTH_MAP = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
@@ -68,7 +70,7 @@ def find_teachers(query: str) -> List[Dict[str, Any]]:
 
     return matches[:10]
 
-async def scrape_teacher_schedule(teacher_id: str, teacher_name: str) -> List[Dict[str, Any]]:
+async def _scrape_teacher_schedule(teacher_id: str, teacher_name: str) -> List[Dict[str, Any]]:
     cache_file = TEACHERS_CACHE_DIR / f"events_{teacher_id}.json"
     
     # Check cache freshness (12 hours)
@@ -76,8 +78,8 @@ async def scrape_teacher_schedule(teacher_id: str, teacher_name: str) -> List[Di
         try:
             mtime = datetime.fromtimestamp(cache_file.stat().st_mtime, tz=TIMEZONE)
             if datetime.now(TIMEZONE) - mtime < timedelta(hours=12):
-                with open(cache_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                raw_cache = await asyncio.to_thread(cache_file.read_text, encoding="utf-8")
+                return json.loads(raw_cache)
         except Exception:
             pass
 
@@ -99,12 +101,19 @@ async def scrape_teacher_schedule(teacher_id: str, teacher_name: str) -> List[Di
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=40)
         out_str = stdout.decode("utf-8", errors="ignore")
         if cache_file.exists():
-            with open(cache_file, "r", encoding="utf-8") as f:
-                return json.load(f)
+            raw_cache = await asyncio.to_thread(cache_file.read_text, encoding="utf-8")
+            return json.loads(raw_cache)
     except Exception as e:
         logger.error("Error scraping teacher schedule: %s", e)
 
     return []
+
+async def scrape_teacher_schedule(teacher_id: str, teacher_name: str) -> List[Dict[str, Any]]:
+    key = str(teacher_id)
+    lock = TEACHER_SCRAPE_LOCKS.setdefault(key, asyncio.Lock())
+    async with lock:
+        async with TEACHER_SCRAPE_SEMAPHORE:
+            return await _scrape_teacher_schedule(teacher_id, teacher_name)
 
 def parse_teacher_events(raw_events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     parsed = []
@@ -283,4 +292,3 @@ def get_teacher_status_card(teacher_name: str, events: List[Dict[str, Any]], lan
                 lines.append(f"  ⏰ <code>{ev['time']}</code> — {ev['subj']}{room_txt}{grp_txt}")
 
     return "\n".join(lines)
-

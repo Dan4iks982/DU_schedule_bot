@@ -10,6 +10,9 @@ import json
 import logging
 import asyncio
 import shutil
+import time as time_module
+import sys
+from time import monotonic
 from datetime import datetime, date, timedelta, time
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -46,6 +49,14 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+def _timed(operation: str, started: float, **fields: Any) -> None:
+    logger.info(
+        "timing operation=%s duration_ms=%.2f %s",
+        operation,
+        (time_module.perf_counter() - started) * 1000,
+        " ".join(f"{key}={value}" for key, value in fields.items()),
+    )
 
 TIMEZONE = ZoneInfo("Europe/Riga")
 
@@ -160,7 +171,11 @@ def get_semester_label(sem_num: int) -> str:
     return f"{course_num} курс / {mapped} сем."
 
 # Master Admin IDs (always authorized) and Secret Passcode
-MASTER_ADMIN_IDS = [879446270, 1441874567]
+MASTER_ADMIN_IDS = [
+    int(value)
+    for value in os.getenv("MASTER_ADMIN_IDS", "879446270,1441874567").split(",")
+    if value.strip().isdigit()
+]
 
 def is_d02do_subgroup_enabled(user_id: Optional[int] = None) -> bool:
     """Check if D02DO academic group choice is enabled.
@@ -169,22 +184,22 @@ def is_d02do_subgroup_enabled(user_id: Optional[int] = None) -> bool:
     return True
 ADMIN_ACCOUNTS = {
     "danik_root": {
-        "password": "Dx9#mK7$vQ2",
+        "password": os.getenv("ADMIN_DANIK_ROOT_PASSWORD", ""),
         "name": "Даниил",
         "username": "Dan4iks982",
         "user_id": 879446270,
         "role": "Главный администратор"
     },
     "sinica_admin": {
-        "password": "Sn8@pL4!zR9",
+        "password": os.getenv("ADMIN_SINICA_PASSWORD", ""),
         "name": "Даник Синица",
         "username": "daniksinica",
         "user_id": 1441874567,
         "role": "Администратор"
     }
 }
-SECRET_ADMIN_PASSCODE = "LUIS777"
-SECRET_ADMIN_KEY = "K7#v9!Q2xP"
+SECRET_ADMIN_PASSCODE = os.getenv("ADMIN_PASSCODE", "")
+SECRET_ADMIN_KEY = os.getenv("ADMIN_KEY", "")
 
 VIP_ECON_USER_ID = 879446270
 VIP_ECON_PROG = "D1270"
@@ -219,6 +234,10 @@ WEEKDAY_LAT_TO_NUM = {
 def load_json(file_path, default=None):
     if default is None:
         default = {}
+    if file_path.name in db.STATE_KEYS:
+        state = db.get_state(file_path.name)
+        if state is not None:
+            return state
     if file_path.exists():
         try:
             with open(file_path, "r", encoding="utf-8") as f:
@@ -229,6 +248,9 @@ def load_json(file_path, default=None):
 
 def save_json(file_path, data):
     file_path.parent.mkdir(parents=True, exist_ok=True)
+    if file_path.name in db.STATE_KEYS:
+        db.set_state(file_path.name, data)
+        return
     with open(file_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
@@ -362,7 +384,8 @@ def is_user_blocked(user_id: int) -> bool:
     blocked = load_json(BLOCKED_FILE, [])
     return user_id in blocked or str(user_id) in blocked
 
-def record_activity(chat_id: int, user_id: int, title: str, username: str, chat_type: str, command: str, details: str = ""):
+def _record_activity(chat_id: int, user_id: int, title: str, username: str, chat_type: str, command: str, details: str = ""):
+    started = time_module.perf_counter()
     now_iso = datetime.now(TIMEZONE).isoformat()
     db.update_user_activity(user_id, username or "", title or "")
     db.record_activity_hit()
@@ -404,6 +427,18 @@ def record_activity(chat_id: int, user_id: int, title: str, username: str, chat_
     cmds = stats.setdefault("commands", {})
     cmds[command] = cmds.get(command, 0) + 1
     save_json(STATS_FILE, stats)
+    _timed("record_activity", started, command=command)
+
+def record_activity(chat_id: int, user_id: int, title: str, username: str, chat_type: str, command: str, details: str = ""):
+    """Persist activity off the Telegram event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _record_activity(chat_id, user_id, title, username, chat_type, command, details)
+        return
+    loop.create_task(asyncio.to_thread(
+        _record_activity, chat_id, user_id, title, username, chat_type, command, details
+    ))
 
 def get_user_settings(user_id: int):
     u = db.get_user(user_id)
@@ -623,21 +658,33 @@ def load_events_from_disk(prog_code: str, sem_num: int = 3):
             "is_calendar_note": is_calendar_note
         })
 
-    # Pass 2: Link active rescheduled slots to original moved-away slots to extract original time
+    # Pass 2: Index moved slots by subject instead of scanning every event for each move.
+    moved_by_subject = {}
+    for old in parsed_events:
+        if old["is_moved_away"]:
+            moved_by_subject.setdefault(old["subj"].casefold(), []).append(old)
+
     for act in parsed_events:
         if act["is_rescheduled"]:
             act_date_str = act["date"].strftime("%d.%m.%Y")
             act_time_norm = act["time"].replace(":", ".")
-            for old in parsed_events:
-                if old["is_moved_away"] and (old["subj"].lower() in act["subj"].lower() or act["subj"].lower() in old["subj"].lower()):
-                    old_target = old.get("parc_uz", "")
-                    if act_time_norm in old_target or act["time"] in old_target or act_date_str in old_target:
-                        old_d_str = old["date"].strftime("%d.%m.%Y")
-                        if old_d_str != act_date_str:
-                            act["rescheduled_from"] = f"перенесено с {old['time']}, {old_d_str[:5]}"
-                        else:
-                            act["rescheduled_from"] = f"перенесено с {old['time']}"
-                        break
+            subject = act["subj"].casefold()
+            candidates = moved_by_subject.get(subject, [])
+            if not candidates:
+                candidates = [
+                    old for key, values in moved_by_subject.items()
+                    if key in subject or subject in key
+                    for old in values
+                ]
+            for old in candidates:
+                old_target = old.get("parc_uz", "")
+                if act_time_norm in old_target or act["time"] in old_target or act_date_str in old_target:
+                    old_d_str = old["date"].strftime("%d.%m.%Y")
+                    if old_d_str != act_date_str:
+                        act["rescheduled_from"] = f"перенесено с {old['time']}, {old_d_str[:5]}"
+                    else:
+                        act["rescheduled_from"] = f"перенесено с {old['time']}"
+                    break
             if not act["rescheduled_from"]:
                 act["rescheduled_from"] = "перенесенное занятие"
 
@@ -648,7 +695,81 @@ def load_events_from_disk(prog_code: str, sem_num: int = 3):
     return parsed_events
 
 EVENTS_CACHE = {}
+EVENTS_CACHE_TIMES = {}
+EVENTS_CACHE_TTL_SECONDS = int(os.getenv("SCHEDULE_CACHE_TTL_SECONDS", "3600"))
+SCHEDULE_REFRESH_TASKS = {}
+SCRAPE_SEMAPHORE = asyncio.Semaphore(int(os.getenv("SCRAPER_CONCURRENCY", "1")))
+SCRAPE_LOCKS = {}
 SUBGROUPS_CACHE = {}
+
+class OutgoingMessageQueue:
+    def __init__(self, bot, workers: int = 2, maxsize: int = 1000):
+        self.bot = bot
+        self.queue = asyncio.Queue(maxsize=maxsize)
+        self.workers = [
+            asyncio.create_task(self._worker())
+            for _ in range(max(1, workers))
+        ]
+
+    async def _worker(self):
+        while True:
+            item = await self.queue.get()
+            try:
+                await self.bot.send_message(**item)
+            except Exception as exc:
+                logger.warning("queued_message_failed chat_id=%s error=%s", item.get("chat_id"), exc)
+                if any(word in str(exc).lower() for word in ("blocked", "forbidden", "deactivated")):
+                    await asyncio.to_thread(db.mark_user_blocked_bot, int(item["chat_id"]), True)
+            finally:
+                self.queue.task_done()
+                await asyncio.sleep(0.05)
+
+    async def enqueue(self, **message) -> bool:
+        try:
+            self.queue.put_nowait(message)
+            return True
+        except asyncio.QueueFull:
+            logger.warning("queued_message_dropped reason=queue_full chat_id=%s", message.get("chat_id"))
+            return False
+
+OUTGOING_QUEUE = None
+
+class ScraperWorkerClient:
+    def __init__(self):
+        self.process = None
+        self.lock = asyncio.Lock()
+
+    async def request(self, **command):
+        async with self.lock:
+            if self.process is None or self.process.returncode is not None:
+                self.process = await asyncio.create_subprocess_exec(
+                    sys.executable,
+                    str(BASE_DIR / "scraper_worker.py"),
+                    cwd=str(BASE_DIR),
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            self.process.stdin.write((json.dumps(command) + "\n").encode())
+            await self.process.stdin.drain()
+            line = await asyncio.wait_for(self.process.stdout.readline(), timeout=75)
+            if not line:
+                raise RuntimeError("scraper worker exited without a response")
+            return json.loads(line)
+
+SCRAPER_WORKER = None
+
+async def scrape_with_worker(prog_code: str, sem_num: int):
+    global SCRAPER_WORKER
+    if SCRAPER_WORKER is None:
+        SCRAPER_WORKER = ScraperWorkerClient()
+    return await SCRAPER_WORKER.request(program=prog_code, semester=sem_num)
+
+def get_outgoing_queue(bot) -> OutgoingMessageQueue:
+    global OUTGOING_QUEUE
+    if OUTGOING_QUEUE is None:
+        OUTGOING_QUEUE = OutgoingMessageQueue(bot)
+    return OUTGOING_QUEUE
 
 def get_program_subgroups(prog_code: str, sem_num: int = 3, events: list = None) -> list[str]:
     """
@@ -698,16 +819,22 @@ def has_course_subgroups(prog_code: str, sem_num: int = 3, events: list = None) 
 def get_events_for(prog_code: str, sem_num: int = 3):
     mapped_sem = SEMESTER_MAP.get(sem_num, sem_num)
     key = f"{prog_code}_sem{mapped_sem}"
+    now = monotonic()
+    cache_expired = (
+        key not in EVENTS_CACHE
+        or now - EVENTS_CACHE_TIMES.get(key, 0) >= EVENTS_CACHE_TTL_SECONDS
+    )
     if key not in EVENTS_CACHE:
         events = load_events_from_disk(prog_code, mapped_sem)
         EVENTS_CACHE[key] = events
-        # If cache is empty, launch async scrape in background if loop is active
-        if not events:
-            try:
-                loop = asyncio.get_running_loop()
-                loop.create_task(run_live_sync(prog_code, mapped_sem))
-            except RuntimeError:
-                pass
+        EVENTS_CACHE_TIMES[key] = now
+    if cache_expired:
+        try:
+            loop = asyncio.get_running_loop()
+            if key not in SCHEDULE_REFRESH_TASKS or SCHEDULE_REFRESH_TASKS[key].done():
+                SCHEDULE_REFRESH_TASKS[key] = loop.create_task(run_live_sync(prog_code, mapped_sem))
+        except RuntimeError:
+            pass
     return EVENTS_CACHE[key]
 
 def reload_cache(prog_code: str, sem_num: int = 3):
@@ -715,29 +842,20 @@ def reload_cache(prog_code: str, sem_num: int = 3):
     key = f"{prog_code}_sem{mapped_sem}"
     SUBGROUPS_CACHE.pop(key, None)
     EVENTS_CACHE[key] = load_events_from_disk(prog_code, mapped_sem)
+    EVENTS_CACHE_TIMES[key] = monotonic()
 
 # --- Live Sync Service ---
 
-async def run_live_sync(prog_code: str = "D01B9", sem_num: int = 3):
+async def _run_live_sync(prog_code: str = "D01B9", sem_num: int = 3):
     logger.info(f"Running scraper.js for {prog_code} sem {sem_num}...")
     old_events = get_events_for(prog_code, sem_num)
     old_changes = {e["id"]: e["change"] for e in old_events if e.get("id") and e.get("change")}
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "node",
-            str(BASE_DIR / "scraper.js"),
-            prog_code,
-            str(sem_num),
-            cwd=str(BASE_DIR),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=50)
-        out_str = stdout.decode("utf-8", errors="ignore")
-        logger.info(f"Scraper output: {out_str}")
+        result = await scrape_with_worker(prog_code, sem_num)
+        logger.info("scraper_result program=%s semester=%s result=%s", prog_code, sem_num, result)
 
-        if proc.returncode == 0 and "success\":true" in out_str:
+        if result.get("success"):
             reload_cache(prog_code, sem_num)
             new_events = get_events_for(prog_code, sem_num)
             
@@ -750,10 +868,30 @@ async def run_live_sync(prog_code: str = "D01B9", sem_num: int = 3):
 
             return True, len(new_events), fresh_diffs
         else:
-            return False, f"Scraper error: {stderr.decode('utf-8', errors='ignore')}", []
+            return False, f"Scraper error: {result.get('error', 'unknown error')}", []
     except Exception as e:
         logger.error(f"Sync failed: {e}")
         return False, str(e), []
+
+async def run_live_sync(prog_code: str = "D01B9", sem_num: int = 3):
+    """Run one bounded scrape per program/semester key."""
+    key = f"{prog_code}_sem{SEMESTER_MAP.get(sem_num, sem_num)}"
+    current = asyncio.current_task()
+    existing = SCHEDULE_REFRESH_TASKS.get(key)
+    if existing is not None and not existing.done() and existing is not current:
+        return await existing
+    SCHEDULE_REFRESH_TASKS[key] = current
+    lock = SCRAPE_LOCKS.setdefault(key, asyncio.Lock())
+    try:
+        async with lock:
+            async with SCRAPE_SEMAPHORE:
+                started = time_module.perf_counter()
+                result = await _run_live_sync(prog_code, sem_num)
+                _timed("schedule_scrape", started, program=prog_code, semester=sem_num)
+                return result
+    finally:
+        if SCHEDULE_REFRESH_TASKS.get(key) is current:
+            SCHEDULE_REFRESH_TASKS.pop(key, None)
 
 # --- Formatting ---
 
@@ -2238,22 +2376,22 @@ async def cmd_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     blocked = set(str(x) for x in load_json(BLOCKED_FILE, []))
 
     sent = 0
+    outgoing = get_outgoing_queue(context.bot)
     for cid in chats.keys():
         if cid in blocked:
             continue
         try:
             user_lang = get_user_lang(int(cid))
             formatted = locales.get_t("broadcast_header", user_lang, sender=admin_name, text=text)
-            await context.bot.send_message(chat_id=int(cid), text=formatted, parse_mode="HTML")
-            sent += 1
-            await asyncio.sleep(0.05)
+            if await outgoing.enqueue(chat_id=int(cid), text=formatted, parse_mode="HTML"):
+                sent += 1
         except Exception as e:
             err_msg = str(e).lower()
             if "blocked" in err_msg or "forbidden" in err_msg or "deactivated" in err_msg:
                 db.mark_user_blocked_bot(int(cid), True)
 
     db.record_message(admin_name, "Рассылка", f"{sent} чатов", text, "ok", "outgoing")
-    await update.message.reply_text(f"✅ Рассылка завершена! Доставлено в {sent} чатов.")
+    await update.message.reply_text(f"✅ Рассылка поставлена в очередь: {sent} чатов.")
 
 async def cmd_broadcast_from(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -2274,22 +2412,22 @@ async def cmd_broadcast_from(update: Update, context: ContextTypes.DEFAULT_TYPE)
     blocked = set(str(x) for x in load_json(BLOCKED_FILE, []))
 
     sent = 0
+    outgoing = get_outgoing_queue(context.bot)
     for cid in chats.keys():
         if cid in blocked:
             continue
         try:
             user_lang = get_user_lang(int(cid))
             formatted = locales.get_t("broadcast_header", user_lang, sender=sender, text=text)
-            await context.bot.send_message(chat_id=int(cid), text=formatted, parse_mode="HTML")
-            sent += 1
-            await asyncio.sleep(0.05)
+            if await outgoing.enqueue(chat_id=int(cid), text=formatted, parse_mode="HTML"):
+                sent += 1
         except Exception as e:
             err_msg = str(e).lower()
             if "blocked" in err_msg or "forbidden" in err_msg or "deactivated" in err_msg:
                 db.mark_user_blocked_bot(int(cid), True)
 
     db.record_message(sender, "Рассылка", f"{sent} чатов", text, "ok", "outgoing")
-    await update.message.reply_text(f"✅ Рассылка от имени «{sender}» завершена! Доставлено в {sent} чатов.")
+    await update.message.reply_text(f"✅ Рассылка от имени «{sender}» поставлена в очередь: {sent} чатов.")
 
 async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -3217,6 +3355,7 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         sent = 0
         status_msg = await query.message.reply_text("⏳ <i>Отправка рассылки студентам...</i>", parse_mode="HTML")
+        outgoing = get_outgoing_queue(context.bot)
         for u in target_users:
             uid = u["user_id"]
             if str(uid) in blocked or u.get("is_blocked"):
@@ -3224,18 +3363,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u_lang = u.get("language") or "ru"
             formatted = locales.get_t("broadcast_header", u_lang, sender=admin_name, text=msg_text)
             try:
-                await context.bot.send_message(chat_id=uid, text=formatted, parse_mode="HTML", disable_notification=True)
-                sent += 1
-                await asyncio.sleep(0.04)
+                if await outgoing.enqueue(chat_id=uid, text=formatted, parse_mode="HTML", disable_notification=True):
+                    sent += 1
             except Exception as e:
-                err_msg = str(e).lower()
-                if "blocked" in err_msg or "forbidden" in err_msg or "deactivated" in err_msg:
-                    db.mark_user_blocked_bot(uid, True)
+                logger.warning("broadcast_queue_error chat_id=%s error=%s", uid, e)
                     
         db.record_message(admin_name, f"Рассылка ({tgt})", f"{sent} чатов", msg_text, "ok", "outgoing")
         await status_msg.edit_text(
-            f"✅ <b>Рассылка успешно выполнена!</b>\n\n"
-            f"Доставлено студентам: <b>{sent} чел</b> (без звука 🔕)",
+            f"✅ <b>Рассылка поставлена в очередь!</b>\n\n"
+            f"Получателей: <b>{sent} чел</b> (без звука 🔕)",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В админку", callback_data="adm_back")]])
         )
@@ -3467,7 +3603,7 @@ async def schedule_monitor_job(context: ContextTypes.DEFAULT_TYPE):
     if not (time(7, 30) <= now.time() <= time(19, 30)):
         return
 
-    active_groups = db.get_active_programs_and_semesters()
+    active_groups = await asyncio.to_thread(db.get_active_programs_and_semesters)
     logger.info(f"Schedule monitor job: checking {len(active_groups)} active groups...")
 
     for prog_code, sem_num in active_groups:
@@ -3490,16 +3626,21 @@ async def schedule_monitor_job(context: ContextTypes.DEFAULT_TYPE):
                 ch_time = ev.get("time", "")
                 change_hash = f"{prog_code}_{sem_num}_{ev_id}_{change_type}_{ch_date}_{ch_time}"
 
-                if not db.is_change_notified(change_hash):
-                    target_students = db.get_users_for_program_semester(prog_code, sem_num)
+                if not await asyncio.to_thread(db.is_change_notified, change_hash):
+                    target_students = await asyncio.to_thread(
+                        db.get_users_for_program_semester, prog_code, sem_num
+                    )
                     # STRICT SAFETY RULE: Only alert test whitelist (Daniel & Danik Sinica) - NEVER spam all students!
                     target_students = [s for s in target_students if s["user_id"] in TEST_ALERT_USER_IDS]
                     if not target_students:
-                        db.mark_change_notified(ev_id, prog_code, sem_num, change_type, change_hash)
+                        await asyncio.to_thread(
+                            db.mark_change_notified, ev_id, prog_code, sem_num, change_type, change_hash
+                        )
                         continue
 
                     logger.info(f"New {change_type} detected: {ev.get('subj')} ({ev_id}) for {prog_code} sem {sem_num}. Alerting {len(target_students)} test admins.")
 
+                    outgoing = get_outgoing_queue(context.bot)
                     for st in target_students:
                         st_id = st["user_id"]
                         st_lang = st.get("language") or "ru"
@@ -3518,12 +3659,13 @@ async def schedule_monitor_job(context: ContextTypes.DEFAULT_TYPE):
                         )
 
                         try:
-                            await context.bot.send_message(chat_id=st_id, text=alert_msg, parse_mode="HTML")
-                            await asyncio.sleep(0.05)
+                            await outgoing.enqueue(chat_id=st_id, text=alert_msg, parse_mode="HTML")
                         except Exception as send_err:
                             logger.warning(f"Could not send test alert to admin {st_id}: {send_err}")
 
-                    db.mark_change_notified(ev_id, prog_code, sem_num, change_type, change_hash)
+                    await asyncio.to_thread(
+                        db.mark_change_notified, ev_id, prog_code, sem_num, change_type, change_hash
+                    )
         except Exception as group_err:
             logger.error(f"Error checking changes for {prog_code} sem {sem_num}: {group_err}")
 
@@ -3546,6 +3688,7 @@ def main():
 
     # Initialize SQLite database
     db.init_db()
+    db.migrate_state_files()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 

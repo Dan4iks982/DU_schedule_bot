@@ -1,6 +1,7 @@
 import sqlite3
 import json
 import logging
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -12,11 +13,19 @@ TIMEZONE = ZoneInfo("Europe/Riga")
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "bot_database.db"
+STATE_KEYS = {
+    "registered_chats.json", "stats.json", "blocked_users.json",
+    "config.json", "inbox_messages.json", "message_history.json",
+}
 
 def get_connection() -> sqlite3.Connection:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 10000")
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 def init_db():
@@ -179,6 +188,13 @@ def init_db():
     """)
     cur.execute("CREATE INDEX IF NOT EXISTS idx_pn_views_pnid ON patchnote_views(patchnote_id);")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_pn_views_uid ON patchnote_views(user_id);")
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS app_state (
+        state_key TEXT PRIMARY KEY,
+        value_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """)
 
     cur.execute("SELECT COUNT(*) as cnt FROM analytics_hourly")
     row_cnt = cur.fetchone()
@@ -201,6 +217,59 @@ def init_db():
     conn.commit()
     conn.close()
     logger.info("Database initialized at %s", DB_PATH)
+
+def get_state(state_key: str) -> Optional[Any]:
+    if state_key not in STATE_KEYS:
+        return None
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT value_json FROM app_state WHERE state_key = ?", (state_key,)
+        ).fetchone()
+        if not row:
+            return None
+        return json.loads(row["value_json"])
+    except (sqlite3.OperationalError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read state %s: %s", state_key, exc)
+        return None
+    finally:
+        conn.close()
+
+def set_state(state_key: str, value: Any) -> None:
+    if state_key not in STATE_KEYS:
+        return
+    conn = get_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO app_state (state_key, value_json, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(state_key) DO UPDATE SET
+                value_json = excluded.value_json,
+                updated_at = excluded.updated_at
+            """,
+            (state_key, json.dumps(value, ensure_ascii=False), datetime.now(TIMEZONE).isoformat()),
+        )
+        conn.commit()
+    except sqlite3.OperationalError as exc:
+        logger.warning("Could not write state %s: %s", state_key, exc)
+    finally:
+        conn.close()
+
+def migrate_state_files() -> None:
+    """Import legacy JSON state once, preserving files for rollback compatibility."""
+    init_db()
+    for state_key in STATE_KEYS:
+        if get_state(state_key) is not None:
+            continue
+        path = DATA_DIR / state_key
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as file:
+                set_state(state_key, json.load(file))
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Could not migrate %s: %s", path, exc)
 
 def get_or_create_user(user_id: int, username: str = "", first_name: str = "", language: str = "ru") -> Dict[str, Any]:
     if language not in ["ru", "lv", "en"]:
