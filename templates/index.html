@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en" x-data="adminApp()" x-init="boot()" :class="{ 'overflow-hidden': modal }">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>DU Schedule / Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            ink: '#09090b', panel: '#121215', line: '#27272a',
+            dim: '#a1a1aa', brand: '#60a5fa'
+          },
+          fontFamily: { sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+            mono: ['ui-monospace', 'SFMono-Regular', 'Menlo', 'monospace'] }
+        }
+      }
+    };
+  </script>
+  <style>
+    [x-cloak]{display:none!important}
+    html,body{background:#09090b;color:#fafafa;font-family:Inter,ui-sans-serif,system-ui,sans-serif}
+    body{min-width:320px}
+    ::-webkit-scrollbar{width:7px;height:7px}
+    ::-webkit-scrollbar-track{background:#09090b}
+    ::-webkit-scrollbar-thumb{background:#3f3f46;border-radius:4px}
+    .mono{font-variant-numeric:tabular-nums}
+    .focus-ring:focus{outline:2px solid #60a5fa;outline-offset:1px}
+    .row-hover{transition:background .12s ease}
+    .row-hover:hover{background:#18181b}
+  </style>
+</head>
+<body class="min-h-screen bg-ink text-zinc-100 antialiased">
+
+  <!-- Authentication -->
+  <template x-if="!authenticated">
+    <main class="min-h-screen grid place-items-center p-5">
+      <form @submit.prevent="login()" class="w-full max-w-sm border border-line bg-panel p-6 rounded-lg">
+        <div class="flex items-center gap-3 mb-7">
+          <div class="h-9 w-9 grid place-items-center rounded-md bg-zinc-800 border border-line">
+            <i data-lucide="shield-check" class="h-5 w-5 text-blue-400"></i>
+          </div>
+          <div><h1 class="font-semibold tracking-tight">DU Schedule</h1><p class="text-xs text-dim">Administrative console</p></div>
+        </div>
+        <label class="block text-xs text-dim mb-1.5">Login</label>
+        <input x-model="loginForm.login" class="focus-ring w-full bg-zinc-950 border border-line rounded-md px-3 py-2 text-sm mb-4" autocomplete="username" required>
+        <label class="block text-xs text-dim mb-1.5">Password</label>
+        <input x-model="loginForm.password" type="password" class="focus-ring w-full bg-zinc-950 border border-line rounded-md px-3 py-2 text-sm mb-5" autocomplete="current-password" required>
+        <button class="focus-ring w-full rounded-md bg-zinc-100 text-zinc-950 py-2 text-sm font-medium hover:bg-white disabled:opacity-50" :disabled="busy">Sign in</button>
+        <p x-show="error" x-text="error" class="mt-4 text-xs text-red-400"></p>
+      </form>
+    </main>
+  </template>
+
+  <template x-if="authenticated">
+    <div class="flex min-h-screen">
+      <!-- Sidebar -->
+      <aside class="fixed inset-y-0 left-0 z-30 flex flex-col border-r border-line bg-panel transition-all duration-150 lg:static"
+             :class="sidebarOpen ? 'w-60' : 'w-[68px]'">
+        <div class="h-14 flex items-center border-b border-line px-3">
+          <button @click="sidebarOpen=!sidebarOpen" class="focus-ring h-8 w-8 grid place-items-center rounded-md hover:bg-zinc-800 text-dim" title="Toggle sidebar">
+            <i :data-lucide="sidebarOpen ? 'panel-left-close' : 'panel-left-open'" class="h-4 w-4"></i>
+          </button>
+          <span x-show="sidebarOpen" x-cloak class="ml-2 text-sm font-semibold tracking-tight whitespace-nowrap">DU / ADMIN</span>
+        </div>
+        <nav class="p-2 space-y-1">
+          <template x-for="item in nav" :key="item.id">
+            <button @click="tab=item.id; sidebarOpen=window.innerWidth>=1024 ? sidebarOpen : false; refreshTab()"
+                    class="focus-ring w-full flex items-center gap-3 rounded-md px-3 py-2 text-sm transition row-hover"
+                    :class="tab===item.id ? 'bg-zinc-800 text-white' : 'text-dim'"
+                    :title="item.label">
+              <i :data-lucide="item.icon" class="h-4 w-4 shrink-0"></i>
+              <span x-show="sidebarOpen" x-cloak class="whitespace-nowrap" x-text="item.label"></span>
+            </button>
+          </template>
+        </nav>
+        <div class="mt-auto border-t border-line p-3">
+          <div x-show="sidebarOpen" x-cloak class="flex items-center gap-2 mb-3">
+            <span class="h-7 w-7 rounded-full bg-zinc-800 grid place-items-center text-xs" x-text="admin.name?.slice(0,1) || 'A'"></span>
+            <div class="min-w-0"><p class="text-xs truncate" x-text="admin.name || 'Administrator'"></p><p class="text-[11px] text-dim truncate" x-text="admin.role || ''"></p></div>
+          </div>
+          <button @click="logout()" class="focus-ring w-full flex items-center gap-3 px-3 py-2 text-sm text-dim hover:text-white rounded-md row-hover">
+            <i data-lucide="log-out" class="h-4 w-4"></i><span x-show="sidebarOpen" x-cloak>Sign out</span>
+          </button>
+        </div>
+      </aside>
+
+      <div class="flex-1 min-w-0 lg:ml-0" :class="!sidebarOpen ? 'lg:pl-0' : ''">
+        <header class="h-14 border-b border-line bg-ink/90 backdrop-blur sticky top-0 z-20 flex items-center justify-between px-4 lg:px-7">
+          <div class="flex items-center gap-3">
+            <button @click="sidebarOpen=true" class="lg:hidden focus-ring text-dim"><i data-lucide="menu" class="h-5 w-5"></i></button>
+            <div><h2 class="text-sm font-semibold" x-text="nav.find(n=>n.id===tab)?.label || 'Dashboard'"></h2><p class="hidden sm:block text-[11px] text-dim">Operational control plane</p></div>
+          </div>
+          <div class="flex items-center gap-3 text-xs text-dim">
+            <span class="hidden sm:inline-flex items-center gap-1.5"><span class="h-1.5 w-1.5 rounded-full" :class="status.status==='running'?'bg-emerald-400':'bg-amber-400'"></span><span x-text="status.status || 'unknown'"></span></span>
+            <span class="font-mono mono" x-text="clock"></span>
+            <button @click="refreshAll()" class="focus-ring h-8 w-8 grid place-items-center rounded-md hover:bg-zinc-800" title="Refresh"><i data-lucide="refresh-cw" class="h-4 w-4" :class="busy?'animate-spin':''"></i></button>
+          </div>
+        </header>
+
+        <main class="p-4 lg:p-7 max-w-[1600px] mx-auto">
+          <!-- Dashboard -->
+          <section x-show="tab==='dashboard'" x-cloak>
+            <div class="grid grid-cols-2 xl:grid-cols-5 border border-line rounded-lg bg-panel mb-5">
+              <div class="p-3 border-b sm:border-b-0 sm:border-r border-line"><p class="label">BOT STATUS</p><p class="mt-1 flex items-center gap-2 text-sm"><span class="h-2 w-2 rounded-full" :class="status.status==='running'?'bg-emerald-400':'bg-red-400'"></span><span x-text="status.status || '—'"></span></p></div>
+              <div class="p-3 border-b sm:border-b-0 xl:border-r border-line"><p class="label">UPTIME</p><p class="mt-1 font-mono mono text-sm" x-text="status.uptime || '—'"></p></div>
+              <div class="p-3 border-b sm:border-b-0 sm:border-r xl:border-r border-line"><p class="label">MEMORY</p><p class="mt-1 font-mono mono text-sm" x-text="telemetry.mem_percent+'%'"></p></div>
+              <div class="p-3 border-b sm:border-b-0 xl:border-r border-line"><p class="label">CPU / 1M</p><p class="mt-1 font-mono mono text-sm" x-text="telemetry.cpu_load_1m"></p></div>
+              <div class="p-3 col-span-2 xl:col-span-1"><p class="label">SCRAPER</p><p class="mt-1 text-sm flex items-center gap-2"><span class="h-2 w-2 rounded-full bg-emerald-400"></span>Worker bounded</p></div>
+            </div>
+
+            <div class="flex flex-wrap gap-2 mb-5">
+              <button @click="action('/api/bot/restart','POST','Bot restarted')" class="btn btn-strong"><i data-lucide="rotate-ccw"></i>Restart bot</button>
+              <button @click="action('/api/sync','POST','Sync queued')" class="btn"><i data-lucide="refresh-cw"></i>Trigger sync</button>
+              <button @click="toggleMaintenance()" class="btn" :class="status.maintenance_mode?'text-amber-300 border-amber-500/40':''"><i data-lucide="wrench"></i><span x-text="status.maintenance_mode?'Disable maintenance':'Maintenance mode'"></span></button>
+            </div>
+
+            <div class="grid grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
+              <template x-for="card in kpis" :key="card.label"><div class="border border-line bg-panel rounded-lg p-4"><div class="flex items-center justify-between"><p class="label" x-text="card.label"></p><i :data-lucide="card.icon" class="h-4 w-4 text-zinc-500"></i></div><p class="mt-3 font-mono mono text-2xl tracking-tight" x-text="card.value"></p><p class="mt-1 text-xs text-dim" x-text="card.note"></p></div></template>
+            </div>
+            <div class="grid xl:grid-cols-2 gap-4">
+              <div class="panel"><div class="panel-head"><span>Live radar</span><button @click="loadRadar()" class="icon-btn"><i data-lucide="refresh-cw"></i></button></div><div class="p-4" x-show="radar"><p class="text-xs text-dim" x-text="radar.now_time || 'No current time'"></p><p class="mt-2 text-lg font-medium" x-text="radar.current_class?.subj || 'No class in progress'"></p><p class="mt-1 text-xs text-dim" x-text="radar.next_class ? 'Next: '+radar.next_class.subj+' · '+radar.next_class.time : 'No next class'"></p></div></div>
+              <div class="panel"><div class="panel-head"><span>System details</span><span class="font-mono text-[11px] text-dim" x-text="status.server_time || '—'"></span></div><div class="p-4 grid grid-cols-2 gap-3 text-xs"><div><p class="label">Disk free</p><p class="mt-1 font-mono" x-text="telemetry.disk_free_gb+' GB'"></p></div><div><p class="label">Requests</p><p class="mt-1 font-mono" x-text="status.total_requests || 0"></p></div><div><p class="label">Inbox</p><p class="mt-1 font-mono" x-text="status.unread_inbox || 0"></p></div><div><p class="label">Last sync</p><p class="mt-1 font-mono truncate" x-text="status.last_sync || '—'"></p></div></div></div>
+            </div>
+          </section>
+
+          <!-- Users -->
+          <section x-show="tab==='users'" x-cloak>
+            <div class="flex flex-col sm:flex-row gap-3 justify-between mb-4"><div><h3 class="section-title">Users</h3><p class="section-sub" x-text="filteredUsers.length+' records'"></p></div><div class="relative w-full sm:w-80"><i data-lucide="search" class="search-icon"></i><input x-model.debounce.150ms="userQuery" class="input pl-9" placeholder="Search name, username, faculty, group"></div></div>
+            <div class="panel overflow-hidden"><div class="overflow-x-auto"><table class="w-full text-sm"><thead><tr class="table-head"><th>User</th><th>Study profile</th><th>Activity</th><th>Status</th><th class="text-right">Actions</th></tr></thead><tbody><template x-for="u in filteredUsers" :key="u.user_id"><tr class="row-hover border-t border-line"><td class="px-4 py-3 min-w-[220px]"><div class="flex items-center gap-2"><span class="h-7 w-7 rounded-full bg-zinc-800 grid place-items-center text-xs" x-text="(u.first_name||'?').slice(0,1)"></span><div><p class="font-medium" x-text="u.first_name || 'Unknown'"></p><p class="text-xs text-dim" x-text="'@'+(u.username||'—')"></p></div></div></td><td class="px-4 py-3"><p x-text="u.program_code || '—'"></p><p class="text-xs text-dim" x-text="u.faculty || '—'"></p></td><td class="px-4 py-3 font-mono mono text-xs"><p x-text="u.request_count || 0"></p><p class="text-dim" x-text="u.last_active || '—'"></p></td><td class="px-4 py-3"><span class="badge" :class="u.is_blocked?'badge-red':'badge-green'" x-text="u.is_blocked?'Blocked':'Active'"></span></td><td class="px-4 py-3"><div class="flex justify-end gap-1"><button @click="warnUser(u)" class="icon-btn" title="Warn"><i data-lucide="triangle-alert"></i></button><button @click="setBlock(u,!u.is_blocked)" class="icon-btn" title="Block/unblock"><i :data-lucide="u.is_blocked?'shield-off':'ban'"></i></button><button @click="openMessage(u)" class="icon-btn" title="Direct message"><i data-lucide="message-square"></i></button></div></td></tr></template><tr x-show="!filteredUsers.length"><td colspan="5" class="p-10 text-center text-sm text-dim">No users found.</td></tr></tbody></table></div></div>
+          </section>
+
+          <!-- Inbox -->
+          <section x-show="tab==='inbox'" x-cloak>
+            <div class="flex items-end justify-between mb-4"><div><h3 class="section-title">Support inbox</h3><p class="section-sub">Tickets and direct conversations</p></div><button @click="modal='broadcast'" class="btn btn-strong"><i data-lucide="megaphone"></i>Broadcast</button></div>
+            <div class="panel h-[calc(100vh-180px)] min-h-[520px] grid md:grid-cols-[280px_1fr] overflow-hidden"><div class="border-r border-line overflow-y-auto"><div class="p-3 border-b border-line"><input x-model="inboxQuery" class="input" placeholder="Filter conversations"></div><template x-for="c in filteredConversations" :key="c.user_id"><button @click="openConversation(c)" class="w-full text-left px-3 py-3 border-b border-line row-hover" :class="conversation?.user_id===c.user_id?'bg-zinc-800':''"><div class="flex justify-between gap-2"><span class="font-medium text-sm truncate" x-text="c.first_name || c.username || c.user_id"></span><span class="font-mono text-[10px] text-dim" x-text="c.last_active || ''"></span></div><p class="text-xs text-dim mt-1 truncate" x-text="c.last_message || 'No recent message'"></p></button></template></div><div class="flex flex-col min-w-0"><div class="p-3 border-b border-line flex justify-between"><div><p class="font-medium text-sm" x-text="conversation?.first_name || 'Select a conversation'"></p><p class="font-mono text-[11px] text-dim" x-text="conversation ? '#'+conversation.user_id : ''"></p></div><button @click="loadInbox()" class="icon-btn"><i data-lucide="refresh-cw"></i></button></div><div class="flex-1 overflow-y-auto p-4 space-y-3"><template x-for="m in messages" :key="m.id"><div :class="m.direction==='incoming'?'mr-auto':'ml-auto'" class="max-w-[85%]"><div class="rounded-md border border-line bg-zinc-900 px-3 py-2 text-sm whitespace-pre-wrap" x-text="m.text"></div><p class="mt-1 font-mono text-[10px] text-dim" x-text="m.created_at || m.time || ''"></p></div></template><p x-show="conversation && !messages.length" class="text-sm text-dim text-center mt-10">No messages in this thread.</p></div><div class="border-t border-line p-3"><div class="flex gap-2"><textarea x-model="replyText" class="input min-h-10 resize-y" rows="2" placeholder="Write a reply…"></textarea><button @click="sendReply()" :disabled="!conversation || !replyText.trim()" class="btn btn-strong self-end"><i data-lucide="send"></i></button></div></div></div></div>
+          </section>
+
+          <!-- Logs -->
+          <section x-show="tab==='logs'" x-cloak>
+            <div class="flex flex-col sm:flex-row gap-3 justify-between mb-4"><div><h3 class="section-title">Live logs</h3><p class="section-sub">Last 200 lines · refresh manually or pause polling</p></div><div class="flex gap-2"><input x-model="logQuery" class="input w-full sm:w-56" placeholder="Filter logs"><button @click="logsPaused=!logsPaused" class="btn"><i :data-lucide="logsPaused?'play':'pause'"></i><span x-text="logsPaused?'Resume':'Pause'"></span></button><button @click="clearLogs()" class="btn text-red-300"><i data-lucide="trash-2"></i>Clear</button></div></div>
+            <div class="panel bg-[#0c0c0f] overflow-hidden"><div class="px-4 py-2 border-b border-line flex items-center gap-2"><span class="h-2 w-2 bg-emerald-400 rounded-full"></span><span class="font-mono text-[11px] text-dim">bot.log</span></div><pre class="h-[calc(100vh-220px)] min-h-[500px] overflow-auto p-4 font-mono text-xs leading-5 whitespace-pre-wrap"><template x-for="line in filteredLogs" :key="line.key"><span class="block" :class="line.color" x-text="line.text"></span></template></pre></div>
+          </section>
+
+          <!-- Settings -->
+          <section x-show="tab==='settings'" x-cloak><div class="max-w-2xl"><h3 class="section-title">Settings</h3><p class="section-sub mb-5">Runtime controls and operator preferences</p><div class="panel"><div class="panel-head">Runtime configuration</div><div class="p-4 space-y-4"><div class="flex items-center justify-between gap-4"><div><p class="text-sm font-medium">Maintenance mode</p><p class="text-xs text-dim">Temporarily stop normal user flows.</p></div><button @click="toggleMaintenance()" class="toggle" :class="status.maintenance_mode?'toggle-on':''"><span></span></button></div><div class="border-t border-line pt-4"><p class="label mb-2">Admin session</p><button @click="logout()" class="btn text-red-300"><i data-lucide="log-out"></i>Sign out of this session</button></div></div></div></div></section>
+        </main>
+      </div>
+    </div>
+  </template>
+
+  <!-- Modals -->
+  <div x-show="modal" x-cloak class="fixed inset-0 z-50 bg-black/70 grid place-items-center p-4" @keydown.escape.window="modal=null">
+    <div @click.outside="modal=null" class="w-full max-w-lg border border-line bg-panel rounded-lg shadow-2xl">
+      <template x-if="modal==='message'"><div><div class="modal-head"><span>Message user</span><button @click="modal=null" class="icon-btn"><i data-lucide="x"></i></button></div><div class="p-4"><p class="text-sm mb-3" x-text="selectedUser?.first_name || selectedUser?.user_id"></p><textarea x-model="messageText" class="input min-h-28" placeholder="Message"></textarea><div class="mt-4 flex justify-end gap-2"><button @click="modal=null" class="btn">Cancel</button><button @click="sendDirectMessage()" class="btn btn-strong">Send</button></div></div></div></template>
+      <template x-if="modal==='broadcast'"><div><div class="modal-head"><span>Broadcast</span><button @click="modal=null" class="icon-btn"><i data-lucide="x"></i></button></div><div class="p-4"><textarea x-model="broadcastText" class="input min-h-32" placeholder="Write announcement…"></textarea><div class="mt-3 border border-line rounded-md p-3 bg-zinc-950"><p class="label mb-2">Preview</p><div class="text-sm whitespace-pre-wrap" x-text="broadcastText || 'Nothing to preview'"></div></div><div class="mt-4 flex justify-end gap-2"><button @click="modal=null" class="btn">Cancel</button><button @click="sendBroadcast()" class="btn btn-strong">Queue broadcast</button></div></div></div></template>
+    </div>
+  </div>
+
+  <div class="fixed top-4 right-4 z-[60] w-[min(360px,calc(100vw-2rem))] space-y-2" x-cloak>
+    <template x-for="toast in toasts" :key="toast.id"><div class="border border-line bg-panel rounded-md px-3 py-2 shadow-xl text-sm flex gap-2 items-start"><i :data-lucide="toast.type==='error'?'circle-alert':'circle-check'" class="h-4 w-4 mt-0.5" :class="toast.type==='error'?'text-red-400':'text-emerald-400'"></i><span x-text="toast.message"></span></div></template>
+  </div>
+
+  <script>
+    const ICONS = () => { if (window.lucide) lucide.createIcons(); };
+    function adminApp() {
+      return {
+        authenticated:false, token:localStorage.getItem('admin_token')||'', admin:{}, error:'',
+        busy:false, sidebarOpen:true, tab:'dashboard', modal:null, clock:'',
+        loginForm:{login:'',password:''}, status:{}, telemetry:{}, radar:{}, users:[], conversations:[], conversation:null, messages:[],
+        userQuery:'', inboxQuery:'', logQuery:'', logs:[], logsPaused:false, selectedUser:null, messageText:'', replyText:'', broadcastText:'', toasts:[],
+        nav:[{id:'dashboard',label:'Dashboard',icon:'layout-dashboard'},{id:'users',label:'Users',icon:'users'},{id:'inbox',label:'Support inbox',icon:'inbox'},{id:'logs',label:'Live logs',icon:'terminal'},{id:'settings',label:'Settings',icon:'settings'}],
+        get telemetrySafe(){return this.telemetry||{}},
+        get filteredUsers(){const q=this.userQuery.toLowerCase();return this.users.filter(u=>!q||[u.first_name,u.username,u.faculty,u.program_code,u.program_name,u.user_id].some(v=>String(v||'').toLowerCase().includes(q)))},
+        get filteredConversations(){const q=this.inboxQuery.toLowerCase();return this.conversations.filter(c=>!q||[c.first_name,c.username,c.user_id,c.last_message].some(v=>String(v||'').toLowerCase().includes(q)))},
+        get filteredLogs(){const q=this.logQuery.toLowerCase();return this.logs.map((text,i)=>({key:i,text,color:/error|exception|traceback/i.test(text)?'text-red-400':/warn/i.test(text)?'text-amber-300':/info/i.test(text)?'text-emerald-300':'text-zinc-300'})).filter(x=>!q||x.text.toLowerCase().includes(q))},
+        get kpis(){return [{label:'TOTAL USERS',value:this.status.total_users||this.users.length||0,note:'Registered accounts',icon:'users'},{label:'ACTIVE TODAY',value:this.status.dau_today||0,note:'Last 24 hours',icon:'activity'},{label:'BLOCKED',value:this.status.blocked_count||0,note:'Restricted accounts',icon:'ban'},{label:'NOTIFICATIONS SENT',value:this.status.total_requests||0,note:'Tracked requests',icon:'send'}]},
+        async boot(){this.clock=new Date().toLocaleTimeString();setInterval(()=>this.clock=new Date().toLocaleTimeString(),1000);if(this.token){const r=await this.api('/api/auth/me');if(r?.authenticated){this.authenticated=true;this.admin=r.admin;await this.refreshAll()}}setInterval(()=>{if(this.authenticated&&!this.logsPaused&&this.tab==='logs')this.loadLogs()},8000);ICONS()},
+        async login(){this.error='';const r=await this.api('/api/auth/login','POST',this.loginForm,false);if(r?.success){this.token=r.token;localStorage.setItem('admin_token',this.token);this.authenticated=true;this.admin=r.admin;await this.refreshAll();this.toast('Signed in')}else this.error=r?.detail||'Authentication failed'},
+        logout(){localStorage.removeItem('admin_token');this.token='';this.authenticated=false;this.admin={}},
+        async api(url,method='GET',body=null,auth=true){try{const opt={method,headers:{'Content-Type':'application/json'}};if(auth&&this.token)opt.headers['X-Admin-Token']=this.token;if(body)opt.body=JSON.stringify(body);const r=await fetch(url,opt);if(r.status===401){this.logout();return null}const data=await r.json().catch(()=>({}));if(!r.ok)throw Error(data.detail||data.message||`Request failed (${r.status})`);return data}catch(e){if(auth)this.toast(e.message,'error');return null}},
+        async refreshAll(){this.busy=true;await Promise.all([this.loadStatus(),this.loadUsers(),this.loadInbox(),this.loadRadar()]);this.busy=false;ICONS()},
+        async refreshTab(){if(this.tab==='dashboard'){await this.loadStatus();await this.loadRadar()}if(this.tab==='users')await this.loadUsers();if(this.tab==='inbox')await this.loadInbox();if(this.tab==='logs')await this.loadLogs();ICONS()},
+        async loadStatus(){const r=await this.api('/api/status');if(r){this.status=r;this.telemetry=r.telemetry||{}}},
+        async loadRadar(){this.radar=await this.api('/api/radar')||{}},
+        async loadUsers(){this.users=await this.api('/api/db/users')||[]},
+        async loadInbox(){const r=await this.api('/api/conversations');this.conversations=Array.isArray(r)?r:(r?.conversations||[]);if(this.conversation)await this.openConversation(this.conversation)},
+        async openConversation(c){this.conversation=c;const r=await this.api('/api/conversations/'+c.user_id);this.messages=Array.isArray(r)?r:(r?.messages||[])},
+        async loadLogs(){const r=await this.api('/api/logs');this.logs=(r?.logs||'').split('\n').filter(Boolean)},
+        async action(url,method,message,body=null){const r=await this.api(url,method,body);if(r){this.toast(message);await this.refreshAll()}},
+        async toggleMaintenance(){await this.action('/api/bot/toggle_maintenance','POST','Maintenance state updated')},
+        async warnUser(u){await this.action('/api/users/warn','POST','Warning added',{user_id:u.user_id,reason:'Warning from admin panel'})},
+        async setBlock(u,block){await this.action(block?'/api/users/block':'/api/users/unblock','POST',block?'User blocked':'User unblocked',{user_id:u.user_id,reason:'Admin panel'});},
+        openMessage(u){this.selectedUser=u;this.messageText='';this.modal='message';ICONS()},
+        async sendDirectMessage(){if(!this.messageText.trim())return;const r=await this.api('/api/message/user','POST',{user_id:this.selectedUser.user_id,message:this.messageText});if(r){this.modal=null;this.toast('Message queued')}},
+        async sendReply(){if(!this.conversation||!this.replyText.trim())return;const r=await this.api('/api/tickets/reply','POST',{ticket_id:this.conversation.ticket_id||this.conversation.id,message:this.replyText});if(r){this.replyText='';this.toast('Reply sent');await this.openConversation(this.conversation)}},
+        async sendBroadcast(){if(!this.broadcastText.trim())return;const r=await this.api('/api/broadcast','POST',{message:this.broadcastText});if(r){this.modal=null;this.broadcastText='';this.toast('Broadcast queued')}},
+        async clearLogs(){if(await this.api('/api/logs/clear','POST')){this.logs=[];this.toast('Logs cleared')}},
+        toast(message,type='success'){const id=Date.now();this.toasts.push({id,message,type});setTimeout(()=>this.toasts=this.toasts.filter(t=>t.id!==id),3500);setTimeout(ICONS,20)}
+      }
+    }
+  </script>
+  <style>
+    .label{font-size:10px;letter-spacing:.08em;color:#71717a;font-weight:600}
+    .section-title{font-size:18px;font-weight:600;letter-spacing:-.02em}
+    .section-sub{font-size:12px;color:#a1a1aa;margin-top:3px}
+    .panel{border:1px solid #27272a;background:#121215;border-radius:8px}
+    .panel-head{height:42px;padding:0 14px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #27272a;font-size:13px;font-weight:500}
+    .input{width:100%;border:1px solid #27272a;background:#09090b;border-radius:6px;padding:8px 10px;font-size:13px;color:#fafafa}
+    .input:focus{outline:2px solid #60a5fa;outline-offset:1px}
+    .btn{display:inline-flex;align-items:center;gap:7px;border:1px solid #3f3f46;background:#18181b;border-radius:6px;padding:7px 11px;font-size:12px;font-weight:500;color:#e4e4e7}
+    .btn:hover{background:#27272a}.btn:disabled{opacity:.45;cursor:not-allowed}.btn-strong{background:#fafafa;color:#09090b;border-color:#fafafa}.btn-strong:hover{background:#e4e4e7}
+    .btn svg,.icon-btn svg{width:14px;height:14px}.icon-btn{display:inline-grid;place-items:center;width:30px;height:30px;color:#a1a1aa;border-radius:5px}.icon-btn:hover{color:#fff;background:#27272a}
+    .badge{display:inline-flex;border:1px solid;padding:2px 7px;border-radius:999px;font-size:10px}.badge-green{color:#86efac;border-color:#166534;background:#052e16}.badge-red{color:#fca5a5;border-color:#7f1d1d;background:#450a0a}
+    .table-head{font-size:10px;text-transform:uppercase;letter-spacing:.08em;color:#71717a;text-align:left;background:#18181b}.table-head th{padding:10px 16px;font-weight:600}
+    .search-icon{position:absolute;left:10px;top:10px;width:15px;height:15px;color:#71717a}
+    .toggle{width:36px;height:20px;border-radius:999px;background:#3f3f46;padding:2px}.toggle span{display:block;width:16px;height:16px;border-radius:50%;background:#a1a1aa;transition:transform .15s}.toggle-on{background:#2563eb}.toggle-on span{transform:translateX(16px);background:#fff}
+    .modal-head{display:flex;align-items:center;justify-content:space-between;padding:13px 16px;border-bottom:1px solid #27272a;font-size:14px;font-weight:600}
+  </style>
+</body>
+</html>
